@@ -8,11 +8,13 @@ import pandas as pd
 import math, os, geocoder, json, requests
 from pandas.io.json import json_normalize
 import numpy as np
+import concurrent.futures
+from multiprocessing import Process
 
 def getUniqueAccessComments():
     '''
     Access wsrb-db-prd-002, Excalibur, DimAcess to get unique AccessComments.
-    On 8/27/2019, 1,312,257 unique comments, exluding obvious no addresses.
+    On 8/27/2019, 1312257 unique comments, exluding obvious no addresses.
     '''
     
     cnxn = pyodbc.connect('Driver={SQL Server};'
@@ -62,46 +64,32 @@ def getUniqueAccessComments():
              order by count desc
           """
     df = pd.read_sql_query(script, cnxn)
-    # print (df.info())
-    
-    # DOUBLE CHECK DROPPED COLUMNS
-    # drop 'Password Reset Ind', 'Rec Eff End Date', 'Rec Delete Date', 
-    #       'Rec Load Date Time', 'Rec Update Date Time'
-    
-    # not necessary, leave out of SQL query
-#    df = df.drop([ 'Rec Delete Date', 'Rec Load Date Time', 'Rec Update Date Time'], axis = 1)
-    
-    # not found
-    #df = df.drop([ 'Unnamed: 0'], axis = 1)
-    
-    # handle in SQL query
-    #df['AccessComments'] = df['AccessComments'].str.upper()
-    
-    # standardizing json so when normalized there isn't extra columns
+        
+    # standardizing json 
     df['AccessComments'] = df['AccessComments'].replace({'ZIPCODE':'ZIP'}, regex=True)
-    
-    # random sample
-    #df_random = df.sample(n=20)
-    # df_random[:10]
     
     print (datetime.datetime.now(),'    Writing to CSV')
     
-    df.to_csv(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\new_comments_12months_Agg.csv')
-    
-#    writer = pd.ExcelWriter(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\new_comments.xlsx')
-#    df.to_excel(writer, sheet_name='new_comments')    
-#    writer.save()    
+    df.to_csv(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\new_comments_12months_Agg.csv') 
     
     print (datetime.datetime.now(),'    Finished exporting to csv')    
     return df
     
-def getLatLong(df):
+def getLatLong(filename):
     '''
-    need to add try except 
+   
     '''
     print (datetime.datetime.now(),'    Geocoding addresses')
     url = 'http://wa-app-prd-001.wsrb.com/AddressWebServiceInternal/api/address/SearchAddressSingleLine/'
-
+    
+    df = pd.read_csv(filename)
+    name, ext = os.path.splitext(filename)
+    
+    folder = r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\results'
+    parts = filename.split("\\")
+    newpath = os.path.join(folder, parts[-1])
+    name, ext = os.path.splitext(newpath)
+    
     for i, row in df.iterrows():
         if df.loc[i, 'AccessComments'].startswith('STREETADDRESS'):
             temp = df.loc[i,'AccessComments'].replace("STREETADDRESS=", ' ')
@@ -110,33 +98,41 @@ def getLatLong(df):
             temp = temp.replace("&STATE=", ' ')
             temp = temp.replace("&ZIP=", ' ')
             temp = temp.replace('%25', ' ')
-        elif df.loc[i, 'AccessComments'].startswith('{"STREETADDRESS'):
+        
+        if df.loc[i, 'AccessComments'].startswith('{"STREETADDRESS'):
             temp = json_normalize(json.loads(df.loc[i, 'AccessComments']))
             cols = ['STREETADDRESS', 'CITY', 'STATE', 'ZIP' ]
             temp['singleaddress'] = temp[cols].apply(lambda row: ' '.join(row.values.astype(str)), axis =1 )
+            
             temp=temp['singleaddress']
             temp = temp.replace({'#':''}, regex=True)
             temp = temp.replace('0  ', '')
-        elif df.loc[i, 'AccessComments'].startswith('{"ZIP'):
+        
+        if df.loc[i, 'AccessComments'].startswith('{"ZIP'):
             temp = json_normalize(json.loads(df.loc[i, 'AccessComments']))
             cols = ['STREETADDRESS', 'CITY', 'STATE', 'ZIP' ]
             temp['singleaddress'] = temp[cols].apply(lambda row: ' '.join(row.values.astype(str)), axis =1 )
+            
             temp=temp['singleaddress']
             temp = temp.replace({'#':''}, regex=True)
-        elif df.loc[i, 'AccessComments'].startswith('{"INPUT":'):
+
+        if df.loc[i, 'AccessComments'].startswith('{"INPUT":'):
             df.loc[i, 'AccessComments']=df.loc[i, 'AccessComments'].replace('\\T', ' ')
             temp = json_normalize(json.loads(df.loc[i, 'AccessComments']))['INPUT'][0]
+            
         else:
             pass
         
         payload=" '{}' ".format(temp)
         payload=payload.replace('0    ', ' ')
-        payload=payload.split('Name')[0]+"'"
+            
         headers = {    'content-type':'application/json',}
         response = requests.post(url, data=payload, headers=headers)
         response_dict = json.loads(response.text)
         df_temp=json_normalize(response_dict,'AddressGeocoded')
+        #print(df_temp.AddressLocation[0]['X'], df_temp.AddressLocation[0]['Y'])
         
+        # handle when return is empty
         if df_temp.empty or df_temp['AddressLocation'].empty:
             pass
         else:
@@ -144,38 +140,36 @@ def getLatLong(df):
             df.at[i, 'long'] = df_temp.AddressLocation[0]['X']
             df.at[i, 'confidence'] = df_temp.Confidence[0]
             df.at[i, 'source'] = df_temp.Source[0]
-            df.at[i, 'inputAddress'] = df_temp.InputAddress
-
-            #df.at[i, 'singlelineaddress'] = temp
     
-    df.to_csv(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\results\new_comments_12months_Agg{_latlong.csv')
+    df.to_csv(name + '_latlong' + ext, header=True, index=False, float_format="%.6f")
     print (datetime.datetime.now(),'    Finished geocoding')
     return df
 
 def joinFrames(df_right):
     
     df_left = pd.read_csv(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\lastday_AccessComments.csv')
-    
     df_join = pd.concat([df_left, df_right], sort=True)
-    
     df_join.to_csv(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\lastday_AccessComments_latlong.csv')
 
 def main():
-    # print date time before processing
     t1 = datetime.datetime.now()
     print (t1)
     
-    #df = getUniqueAccessComments()
-    
-    # return variable from getAccessComments()
-    # raw = r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\new_comments.csv'
+    df = getUniqueAccessComments()
     
     # hard coding for now so don't need to send query
     #with concurrent.futures.ProcessPoolExecutor() as executor:
     
     #df = pd.read_csv(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\test_multiprocessing.csv')
     
-    df = pd.read_csv(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\split_files_499\new_comments_12months_Agg{.csv')
+    #df = pd.read_csv(r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\split_files_7841\new_comments_12months_Agg{.csv')
+    a = r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\split_files\new_comments_12months_Agg_2.csv'
+    b = r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\split_files\new_comments_12months_Agg_3.csv'
+    #c = r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\split_files\new_comments_12months_Agg_4.csv'
+    #d = r'C:\Users\zhuzhux\Desktop\19_017_userAccessCommentAddress\split_files\new_comments_12months_Agg_5.csv'
+    
+    Process(target=getLatLong, args=a).start()
+    Process(target=getLatLong, args=b).start()    
     
 #    p1=Process(target = getLatLong(df))
 #    p1.start()
@@ -183,14 +177,11 @@ def main():
 #    p2.start()
 #    p1.join()
 #    p2.join()
-    df = getLatLong(df)
-    
+    #df = getLatLong(df)
     
     #joinFrames(df)
     
-    # print date time after processing
     t2 = datetime.datetime.now()
-    #find total time elapsed
     print (t2 - t1)
 
 if __name__ == '__main__':
